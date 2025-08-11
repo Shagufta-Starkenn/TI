@@ -1,0 +1,36 @@
+cmake_minimum_required(VERSION 3.10)
+
+project(OpenSeeFaceMNN)
+
+# Set C++ standard
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Find OpenCV
+find_package(OpenCV REQUIRED)
+
+
+# Find dlib
+find_package(dlib REQUIRED)
+
+
+# Find MNN
+find_library(MNN_LIBRARY NAMES MNN libMNN PATHS /usr/lib /usr/local/lib /home/itstarkenn/Documents/MNN_TI/Ultra-Light-Fast-Generic-Face-Detector-1MB/MNN/mnn/lib)
+find_path(MNN_INCLUDE_DIR NAMES MNN/Interpreter.hpp PATHS /usr/include /usr/local/include /home/itstarkenn/Documents/MNN_TI/Ultra-Light-Fast-Generic-Face-Detector-1MB/MNN/mnn/include)
+
+
+# Include directories
+include_directories(${CMAKE_SOURCE_DIR})
+
+# Add executable
+add_executable(openseeface_mnn /home/itstarkenn/ULFFD_OPENSEEFACE/FINAL_WORKING_CODE_laptop.cpp)
+
+# Link libraries
+target_link_libraries(openseeface_mnn
+    ${OpenCV_LIBS}
+    dlib::dlib
+    ${MNN_LIBRARY}
+)
+
+# Optional: Enable optimizations
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
