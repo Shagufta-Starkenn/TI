@@ -1,10 +1,10 @@
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
-#include <MNN/ImageProcess.hpp> // Keep this for UltraFace's ImageProcess and now for LandmarkModel
+#include <MNN/ImageProcess.hpp>
 #include <opencv2/opencv.hpp>
-// #include <opencv2/dnn.hpp> // REMOVED: No longer required for dnn::blobFromImage
 #include <iostream>
-#include <chrono>
+#include <chrono> // Added for timing
+#include <iomanip> // Added for output formatting
 #include <cmath>
 #include <vector>
 #include <memory>
@@ -356,37 +356,47 @@ int main(int argc, char **argv) {
 
     // Initialize Landmark Model
     LandmarkModel landmark_model(argv[2]);
-	int frame_count = 0; 
-    //cv::namedWindow("Webcam", cv::WINDOW_AUTOSIZE);
+    
+    // Variables for FPS calculation
+    auto last_time = std::chrono::high_resolution_clock::now();
+    double fps = 0.0;
+    
+    // Variables for individual model timing
+    double detection_time_ms = 0.0;
+    double landmark_time_ms = 0.0;
+
+int frame_count = 0;
+    //cv::namedWindow("Webcam", cv::WINDOW_AUTOSIZE); // Uncomment if you want to explicitly name the window
     while (true) {
         cv::Mat frame;
-	//int frame_count = 0;
         if (!cap.read(frame)) break;
+
+        // Start timer for overall frame processing
+        auto start_time_overall = std::chrono::high_resolution_clock::now();
 
         // Flip frame horizontally for more intuitive viewing
         flip(frame, frame, 1);
 
-        // Face detection
-        auto start_det = chrono::high_resolution_clock::now();
+        // --- Face detection timing ---
+        auto start_time_detect = std::chrono::high_resolution_clock::now();
         vector<FaceInfo> faces = detector.detect(frame);
-        auto end_det = chrono::high_resolution_clock::now();
-        double det_time = chrono::duration<double, milli>(end_det - start_det).count();
+        auto end_time_detect = std::chrono::high_resolution_clock::now();
+        detection_time_ms = std::chrono::duration<double, std::milli>(end_time_detect - start_time_detect).count();
 
-        // Declare processing time variables with wider scope
-        double pp_lm_time = 0.0; // Combined preprocessing and landmark inference time
+        landmark_time_ms = 0.0; // Reset landmark time for each frame
+        if (!faces.empty()) { // Only measure landmark time if a face is detected
+            // For simplicity, we'll measure the landmark time for the first detected face.
+            // If you need average time for multiple faces, you'd sum and divide.
+            auto &f = faces[0]; // Use the first detected face for landmark timing example
 
-        for (auto &f : faces) {
-            cv::rectangle(frame, cv::Point(int(f.x1), int(f.y1)), cv::Point(int(f.x2), int(f.y2)), cv::Scalar(0, 255, 0), 2);
-            cv::putText(frame, cv::format("Score: %.2f",f.score), cv::Point(int(f.x1),int(f.y1)-5),
-                        cv::FONT_HERSHEY_SIMPLEX,0.5, cv::Scalar(0,255,0),1);
-             
+            // --- Landmark model timing ---
+            auto start_time_landmark = std::chrono::high_resolution_clock::now();
+
             int face_width = f.x2 - f.x1;
             int face_height = f.y2 - f.y1;
             int center_x = f.x1 + face_width / 2;
             int center_y = f.y1 + face_height / 2;
              
-            // Expand the face bounding box to create a larger crop for landmark prediction
-            // This is common practice as landmarks can sometimes fall outside the tight face box.
             int side = static_cast<int>(std::max(face_width, face_height) * 1.5);
              
             int x1 = center_x - side / 2;
@@ -394,91 +404,82 @@ int main(int argc, char **argv) {
             int x2 = x1 + side;
             int y2 = y1 + side;
              
-            // Clamp the crop coordinates to the frame boundaries
             clamp_to_im(x1, y1, frame.cols, frame.rows);
             clamp_to_im(x2, y2, frame.cols, frame.rows);
 
             cv::Rect crop_rect(x1, y1, x2 - x1, y2 - y1);
-            if (crop_rect.width <= 0 || crop_rect.height <= 0) continue;
+            if (crop_rect.width > 0 && crop_rect.height > 0) { // Ensure valid crop_rect
+                double scale_x = double(crop_rect.width) / RES;
+                double scale_y = double(crop_rect.height) / RES;
+                double bonus_value = 0.1;
+                Vec<double, 5> crop_info(static_cast<double>(crop_rect.x), static_cast<double>(crop_rect.y), scale_x, scale_y, bonus_value);
 
-            // Calculate scale factors for crop_info (still needed for process_landmarks post-processing)
-            double scale_x = double(crop_rect.width) / RES;
-            double scale_y = double(crop_rect.height) / RES;
-            double bonus_value = 0.1; // This value is present in the new code's crop_info
-            // crop_info contains: crop_x1, crop_y1, scale_x, scale_y, bonus_value
-            Vec<double, 5> crop_info(static_cast<double>(crop_rect.x), static_cast<double>(crop_rect.y), scale_x, scale_y, bonus_value);
+                Mat output = landmark_model.predict(frame, crop_rect);
+                auto lm_result = process_landmarks(output, crop_info);
+                
+                auto end_time_landmark = std::chrono::high_resolution_clock::now();
+                landmark_time_ms = std::chrono::duration<double, std::milli>(end_time_landmark - start_time_landmark).count();
 
-            // Preprocess and run landmark detection using the modified LandmarkModel::predict
-            auto start_pp_lm = chrono::high_resolution_clock::now();
-            Mat output = landmark_model.predict(frame, crop_rect); // Pass raw frame and crop_rect
-            auto lm_result = process_landmarks(output, crop_info);
-            auto end_pp_lm = chrono::high_resolution_clock::now();
-            // Assign combined preprocessing and landmark inference time
-            pp_lm_time = chrono::duration<double, milli>(end_pp_lm - start_pp_lm).count();
+                float avg_conf = lm_result.first;
+                Mat lms = lm_result.second;
 
-            float avg_conf = lm_result.first;
-            Mat lms = lm_result.second; // lms contains (Y, X, Confidence)
+                // Draw landmarks for the first face
+                vector<Point> landmark_points;
+                for (int i = 0; i < lms.rows; i++) {
+                    float ly_coord = lms.at<float>(i, 0);
+                    float lx_coord = lms.at<float>(i, 1);
+                     
+                    if (!isnan(lx_coord) && !isnan(ly_coord)) {
+                        Point pt(static_cast<int>(lx_coord), static_cast<int>(ly_coord));
+                        circle(frame, pt, 2, Scalar(0, 0, 255), -1);
+                        landmark_points.push_back(pt);
+                    }
+                }
 
-            // Draw landmarks
-            vector<Point> landmark_points;
-            for (int i = 0; i < lms.rows; i++) {
-                float ly_coord = lms.at<float>(i, 0); // This is the Y-coordinate
-                float lx_coord = lms.at<float>(i, 1); // This is the X-coordinate
-                 
-                if (!isnan(lx_coord) && !isnan(ly_coord)) {
-                    // OpenCV Point expects (x, y)
-                    Point pt(static_cast<int>(lx_coord), static_cast<int>(ly_coord));
-                    circle(frame, pt, 2, Scalar(0, 0, 255), -1);
-                    landmark_points.push_back(pt);
+                if (!landmark_points.empty()) {
+                    int min_x = frame.cols, max_x = 0;
+                    int min_y = frame.rows, max_y = 0;
+                    for (const auto& pt : landmark_points) {
+                        min_x = min(min_x, pt.x);
+                        max_x = max(max_x, pt.x);
+                        min_y = min(min_y, pt.y);
+                        max_y = max(max_y, pt.y);
+                    }
+                    int padding = max((max_x - min_x) / 10, (max_y - min_y) / 10);
+                    min_x = max(0, min_x - padding);
+                    max_x = min(frame.cols - 1, max_x + padding);
+                    min_y = max(0, min_y - padding);
+                    max_y = min(frame.rows - 1, max_y + padding);
                 }
             }
-
-            // Calculate adjusted bounding box based on landmarks (from new provided code)
-            if (!landmark_points.empty()) {
-                // Find min/max coordinates from landmarks
-                int min_x = frame.cols, max_x = 0;
-                int min_y = frame.rows, max_y = 0;
-                for (const auto& pt : landmark_points) {
-                    min_x = min(min_x, pt.x);
-                    max_x = max(max_x, pt.x);
-                    min_y = min(min_y, pt.y);
-                    max_y = max(max_y, pt.y);
-                }
-                 
-                // Add some padding around the landmarks
-                int padding = max((max_x - min_x) / 10, (max_y - min_y) / 10);
-                min_x = max(0, min_x - padding);
-                max_x = min(frame.cols - 1, max_x + padding);
-                min_y = max(0, min_y - padding);
-                max_y = min(frame.rows - 1, max_y + padding);
-                 
-                // Draw the adjusted bounding box
-                // rectangle(frame, adjusted_rect, Scalar(0, 255, 255), 2); // Commented out the yellow bounding box
-            }
+            
+            // Draw bounding box for the first face
+            cv::rectangle(frame, cv::Point(int(f.x1), int(f.y1)), cv::Point(int(f.x2), int(f.y2)), cv::Scalar(0, 255, 0), 2);
+            cv::putText(frame, cv::format("Score: %.2f",f.score), cv::Point(int(f.x1),int(f.y1)-5),
+                        cv::FONT_HERSHEY_SIMPLEX,0.5, cv::Scalar(0,255,0),1);
         }
 
-        // Display FPS
-        static double fps = 0;
-        static auto last_time = chrono::high_resolution_clock::now();
-        auto current_time = chrono::high_resolution_clock::now();
-        double elapsed = chrono::duration<double>(current_time - last_time).count();
-        fps = 0.9 * fps + 0.1 * (1.0 / elapsed);
-        last_time = current_time;
-         
-        putText(frame, format("FPS: %.1f", fps), Point(10, 30),
-               FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 0), 2);
+        // Stop timer for overall frame processing
+        auto end_time_overall = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double> elapsed_seconds_overall = end_time_overall - start_time_overall;
+        
+        // Calculate instantaneous FPS
+        fps = 1.0 / elapsed_seconds_overall.count();
 
-        // Display processing times
-        putText(frame, format("Det Time: %.2f ms", det_time), Point(10, 60),
-                FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 255, 0), 1);
-        putText(frame, format("PP+LM Time: %.2f ms", pp_lm_time), Point(10, 80), // Combined time
-                FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 255, 0), 1);
-
-	std::string filename = cv::format("frame_%04d.jpg", frame_count++);
-        cv::imwrite(filename, frame);
+        // Display FPS on the frame
+        cv::putText(frame, cv::format("FPS: %.2f", fps), cv::Point(10, 30),
+                    cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 255), 2);
+        
+        // Display individual model times
+        cv::putText(frame, cv::format("Detect: %.2f ms", detection_time_ms), cv::Point(10, 60),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 0, 0), 2);
+        cv::putText(frame, cv::format("Landmark: %.2f ms", landmark_time_ms), cv::Point(10, 90),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 0, 0), 2);
+	std::string filename = cv::format("frame_%04d.jpg", frame_count++);                                                     
+        cv::imwrite(filename, frame); 
         //cv::imshow("Webcam", frame);
         //char k = cv::waitKey(1);
-       // if (k == 27 || k == 'q') break;
+      //  if (k == 27 || k == 'q') break;
     }
 
     //cap.release();
