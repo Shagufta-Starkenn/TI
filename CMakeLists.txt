@@ -31,7 +31,7 @@ include_directories(
 )
 
 # Add executable
-add_executable(openseeface_mnn /home/MNN/ti/src/FINAL_WORKING_CODE_laptop.cpp)
+add_executable(openseeface_mnn /home/MNN/ti/src/FINAL_WORKING_CODE_onboard.cpp)
 
 # Link libraries
 target_link_libraries(openseeface_mnn
